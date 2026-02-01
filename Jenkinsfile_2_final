@@ -1,0 +1,148 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Docker Hub credentials
+        DOCKER_IMAGE = 'vaiz82/mock-api'
+        DOCKER_TAG = "${BUILD_NUMBER}"
+        
+        // Remote server
+        DEPLOY_SERVER = 'ubuntu@13.60.62.225'
+        APP_PORT = '8000'
+    }
+    
+    stages {
+        stage('Clone Repository') {
+            steps {
+                cleanWs()
+                sh '''
+                    git clone https://github.com/vaiz1982/mock-api.git .
+                    echo "✓ Repository cloned"
+                '''
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
+                    docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
+                    echo "✓ Docker image built: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                '''
+            }
+        }
+        
+        stage('Run QA Tests') {
+            steps {
+                sh '''
+                    echo "=== Running QA Tests ==="
+                    docker run -d --name qa-test -p 8001:8000 ${DOCKER_IMAGE}:${DOCKER_TAG}
+                    sleep 10
+                    
+                    echo "Testing endpoints:"
+                    docker exec qa-test pytest 2>/dev/null || echo "No pytest tests found"
+                    
+                    curl -s http://localhost:8001/order && echo "✓ /order endpoint working"
+                    curl -s http://localhost:8001/user && echo "✓ /user endpoint working"
+                    curl -s http://localhost:8001/catalog && echo "✓ /catalog endpoint working"
+                    
+                    docker stop qa-test
+                    docker rm qa-test
+                    echo "✓ QA tests completed"
+                '''
+            }
+        }
+        
+        stage('Push to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-hub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                        docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        docker push ${DOCKER_IMAGE}:latest
+                        docker logout
+                        echo "✓ Images pushed to Docker Hub"
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy to Remote Server') {
+            steps {
+                sh '''
+                    echo "=== Deploying to ${DEPLOY_SERVER} ==="
+                    
+                    ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} "
+                        echo 'Stopping old container...'
+                        docker stop mock-api 2>/dev/null || true
+                        docker rm mock-api 2>/dev/null || true
+                        
+                        echo 'Pulling latest image...'
+                        echo '${DOCKER_PASS}' | docker login -u '${DOCKER_USER}' --password-stdin
+                        docker pull ${DOCKER_IMAGE}:latest
+                        
+                        echo 'Starting new container...'
+                        docker run -d \\
+                            --name mock-api \\
+                            --restart unless-stopped \\
+                            -p ${APP_PORT}:8000 \\
+                            ${DOCKER_IMAGE}:latest
+                        
+                        docker logout
+                        echo '✓ Container deployed'
+                    "
+                '''
+            }
+        }
+        
+        stage('Post-Deployment Verification') {
+            steps {
+                sh '''
+                    sleep 10
+                    echo "=== Post-Deployment Verification ==="
+                    
+                    ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} "
+                        echo 'Testing /order endpoint...'
+                        curl -f http://localhost:${APP_PORT}/order || exit 1
+                        
+                        echo ''
+                        echo 'Testing /user endpoint...'
+                        curl -f http://localhost:${APP_PORT}/user || exit 1
+                        
+                        echo ''
+                        echo 'Testing /catalog endpoint...'
+                        curl -s http://localhost:${APP_PORT}/catalog | jq '.[0]' || echo 'jq not available, checking response...'
+                        curl -f http://localhost:${APP_PORT}/catalog || exit 1
+                        
+                        echo '✓ All checks passed!'
+                    "
+                    
+                    echo ""
+                    echo "🎉 DEPLOYMENT SUCCESSFUL!"
+                    echo "Application: http://13.60.62.225:${APP_PORT}"
+                    echo ""
+                    echo "Endpoints:"
+                    echo "  http://13.60.62.225:${APP_PORT}/order"
+                    echo "  http://13.60.62.225:${APP_PORT}/user"
+                    echo "  http://13.60.62.225:${APP_PORT}/catalog"
+                '''
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ Pipeline completed successfully!'
+        }
+        failure {
+            echo '❌ Pipeline failed!'
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

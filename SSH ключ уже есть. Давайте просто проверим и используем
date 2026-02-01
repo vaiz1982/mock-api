@@ -1,0 +1,90 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = 'vaiz82/mock-api'
+        DOCKER_TAG = "${BUILD_NUMBER}"
+        DEPLOY_SERVER = 'ubuntu@13.60.62.225'
+        APP_PORT = '8000'
+    }
+    
+    stages {
+        stage('Show SSH Key') {
+            steps {
+                sh '''
+                    echo "=== Jenkins SSH Public Key ==="
+                    echo "Copy this key to ~/.ssh/authorized_keys on 13.60.62.225:"
+                    echo ""
+                    # Попробуем получить ключ разными способами
+                    cat /var/lib/jenkins/.ssh/id_rsa.pub 2>/dev/null || \
+                    sudo cat /var/lib/jenkins/.ssh/id_rsa.pub 2>/dev/null || \
+                    echo "Cannot access SSH key. Run manually: sudo cat /var/lib/jenkins/.ssh/id_rsa.pub"
+                    echo ""
+                '''
+            }
+        }
+        
+        stage('Clone and Build') {
+            steps {
+                cleanWs()
+                sh '''
+                    git clone https://github.com/vaiz1982/mock-api.git .
+                    docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
+                    docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
+                    echo "✓ Image built: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                '''
+            }
+        }
+        
+        stage('Test Locally') {
+            steps {
+                sh '''
+                    docker run -d --name test-app -p 8001:8000 ${DOCKER_IMAGE}:${DOCKER_TAG}
+                    sleep 10
+                    curl http://localhost:8001/order && echo "✓ Local test passed"
+                    docker stop test-app
+                    docker rm test-app
+                '''
+            }
+        }
+        
+        stage('Push to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-hub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                        docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        docker push ${DOCKER_IMAGE}:latest
+                        docker logout
+                        echo "✓ Pushed to Docker Hub"
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy Instructions') {
+            steps {
+                sh '''
+                    echo "=== DEPLOYMENT INSTRUCTIONS ==="
+                    echo ""
+                    echo "1. On server 13.60.62.225, run:"
+                    echo "   docker stop mock-api 2>/dev/null || true"
+                    echo "   docker rm mock-api 2>/dev/null || true"
+                    echo "   docker run -d --name mock-api -p 8000:8000 ${DOCKER_IMAGE}:latest"
+                    echo ""
+                    echo "2. Test deployment:"
+                    echo "   curl http://13.60.62.225:8000/order"
+                    echo ""
+                    echo "=== To automate future deployments ==="
+                    echo "Add Jenkins SSH key to 13.60.62.225:"
+                    echo "Run on Jenkins server: sudo cat /var/lib/jenkins/.ssh/id_rsa.pub"
+                    echo "Copy output and add to ~/.ssh/authorized_keys on 13.60.62.225"
+                '''
+            }
+        }
+    }
+}

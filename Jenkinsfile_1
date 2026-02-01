@@ -1,0 +1,87 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = 'vaiz82/mock-api'
+        DOCKER_TAG = "${BUILD_NUMBER}"
+        DEPLOY_SERVER = 'ubuntu@13.60.62.225'
+        APP_PORT = '8000'
+    }
+    
+    stages {
+        stage('Clone and Build') {
+            steps {
+                cleanWs()
+                sh '''
+                    git clone https://github.com/vaiz1982/mock-api.git .
+                    docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
+                    docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
+                '''
+            }
+        }
+        
+        stage('Push to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-hub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                        docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        docker push ${DOCKER_IMAGE}:latest
+                        docker logout
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy Automatically') {
+            steps {
+                sh '''
+                    echo "=== Deploying to ${DEPLOY_SERVER} ==="
+                    
+                    ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} "
+                        echo 'Stopping old container...'
+                        docker stop mock-api 2>/dev/null || true
+                        docker rm mock-api 2>/dev/null || true
+                        
+                        echo 'Pulling latest image...'
+                        echo '${DOCKER_PASS}' | docker login -u '${DOCKER_USER}' --password-stdin
+                        docker pull ${DOCKER_IMAGE}:latest
+                        
+                        echo 'Starting container...'
+                        docker run -d \\
+                            --name mock-api \\
+                            --restart unless-stopped \\
+                            -p ${APP_PORT}:8000 \\
+                            ${DOCKER_IMAGE}:latest
+                        
+                        docker logout
+                        echo '✓ Container deployed'
+                    "
+                '''
+            }
+        }
+        
+        stage('Verify') {
+            steps {
+                sh '''
+                    sleep 10
+                    echo "=== Verifying deployment ==="
+                    
+                    ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} "
+                        echo 'Testing endpoints:'
+                        curl -s http://localhost:${APP_PORT}/order && echo '✓ /order OK'
+                        curl -s http://localhost:${APP_PORT}/user && echo '✓ /user OK'
+                        curl -s http://localhost:${APP_PORT}/catalog && echo '✓ /catalog OK'
+                    "
+                    
+                    echo ""
+                    echo "🎉 Application deployed to: http://13.60.62.225:${APP_PORT}"
+                '''
+            }
+        }
+    }
+}
